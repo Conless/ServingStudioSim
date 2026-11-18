@@ -124,13 +124,14 @@ impl Deployment for UnifiedDeployment {
                 batch_policy,
                 kv_admission,
                 gpu_time_multiplier,
+                pending_order,
                 // Read by `prefill_gpu_time_multiplier` below.
                 ..
             } => (
                 *attn_gpu_memory_gb,
                 *gpu_time_multiplier,
                 Some(*max_batch_tokens),
-                PendingOrderKind::Fifo,
+                *pending_order,
                 PrefixCacheMode::Opportunistic,
                 PrefixCachePolicy::Lru,
                 None,
@@ -183,6 +184,12 @@ impl Deployment for UnifiedDeployment {
             batch_policy,
             kv_admission,
             prefix_cache,
+            context_cache: match &g.worker {
+                IterWorkerSel::ChunkedPrefill { context_cache, .. } => {
+                    context_cache.resolve("unified")?
+                }
+                _ => None,
+            },
             prefill_chunk_alignment: g.worker.prefill_chunk_alignment(),
             max_model_len: g.arch.max_model_len().ok(),
             speculative_draft_tokens: speculative_draft_tokens(&g.worker),
@@ -1263,6 +1270,8 @@ mod tests {
             dp_placement: DpPlacement::RoundRobin,
             prefill_chunk_alignment: None,
             kv_accounting: Default::default(),
+            context_cache: Default::default(),
+            pending_order: PendingOrderKind::Fifo,
         }
     }
 

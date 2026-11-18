@@ -18,7 +18,8 @@ use schema_derive::{ParamStruct, ProviderSchema};
 
 use super::admission::PendingOrderKind;
 use super::kv::{
-    KvOverhead, PrefixCacheConfig, PrefixCacheMode, PrefixCachePolicy, PrefixResumePoints,
+    ContextCacheConfig, ContextCachePolicy, KvOverhead, PrefixCacheConfig, PrefixCacheMode,
+    PrefixCachePolicy, PrefixResumePoints,
 };
 use super::types::WorkerConfig;
 
@@ -215,6 +216,87 @@ impl KvAdmissionSpec {
     }
 }
 
+fn fifo_pending_order() -> PendingOrderKind {
+    PendingOrderKind::Fifo
+}
+
+const CONTEXT_CACHE_POLICY_CHOICES: [&str; 2] = ["lru", "price-graph"];
+
+/// Selector knobs of the content-level retained-KV cache. Absent `context_cache`
+/// keeps the session-entry cache and everything else here is ignored.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Deserialize, ParamStruct)]
+pub struct ContextCacheSpec {
+    /// Keep each session's token tree, with KV and states resident per tier,
+    /// replaced by this policy.
+    #[serde(default)]
+    #[param(string, choices = CONTEXT_CACHE_POLICY_CHOICES)]
+    context_cache: Option<ContextCachePolicy>,
+    /// Host memory per attention partition (GB).
+    #[serde(default)]
+    host_cache_gb: f64,
+    /// Host link rate per partition (GB/s).
+    #[serde(default)]
+    host_link_gb_per_s: Option<f64>,
+    /// Keep a host copy at insertion rather than on eviction.
+    #[serde(default)]
+    host_write_through: bool,
+    /// Share of each tier only states may use. Absent is one shared pool.
+    #[serde(default)]
+    state_pool_share: Option<f64>,
+    /// Bytes one retained token costs, when the modeled engine's KV differs from
+    /// the arch layout's. Absent uses the layout.
+    #[serde(default)]
+    context_bytes_per_token: Option<u64>,
+    /// KV page: a resume position is a multiple of this many tokens.
+    #[serde(default)]
+    context_page_tokens: Option<u32>,
+    /// `alpha p + beta p^2 / 2` estimates the seconds to recompute `p` tokens.
+    /// `price-graph` weighs that against the bytes it takes to avoid it.
+    #[serde(default)]
+    recompute_alpha_s: Option<f64>,
+    #[serde(default)]
+    recompute_beta_s: Option<f64>,
+}
+
+impl ContextCacheSpec {
+    pub(crate) fn resolve(self, owner: &str) -> Result<Option<ContextCacheConfig>> {
+        let Some(policy) = self.context_cache else {
+            return Ok(None);
+        };
+        ensure!(
+            self.host_cache_gb.is_finite() && self.host_cache_gb >= 0.0,
+            "{owner}: host_cache_gb must be finite and >= 0"
+        );
+        let link_gb_per_s = self.host_link_gb_per_s.unwrap_or(50.0);
+        ensure!(
+            link_gb_per_s.is_finite() && link_gb_per_s > 0.0,
+            "{owner}: host_link_gb_per_s must be finite and > 0"
+        );
+        if let Some(share) = self.state_pool_share {
+            ensure!(
+                share > 0.0 && share < 1.0,
+                "{owner}: state_pool_share must be in (0, 1)"
+            );
+        }
+        ensure!(
+            policy != ContextCachePolicy::PriceGraph
+                || (self.recompute_alpha_s.is_some() && self.recompute_beta_s.is_some()),
+            "{owner}: context_cache `price-graph` needs recompute_alpha_s and recompute_beta_s"
+        );
+        Ok(Some(ContextCacheConfig {
+            policy,
+            host_capacity_bytes: (self.host_cache_gb * 1e9) as u64,
+            link_bytes_per_s: link_gb_per_s * 1e9,
+            recompute_alpha_s: self.recompute_alpha_s.unwrap_or(0.0),
+            recompute_beta_s: self.recompute_beta_s.unwrap_or(0.0),
+            write_through: self.host_write_through,
+            state_share: self.state_pool_share,
+            page_tokens: self.context_page_tokens.unwrap_or(64).max(1),
+            bytes_per_token: self.context_bytes_per_token,
+        }))
+    }
+}
+
 const KV_OVERHEAD_CHOICES: [&str; 2] = ["vllm", "none"];
 const PREFIX_RESUME_POINTS_CHOICES: [&str; 4] = [
     "prompt_end",
@@ -399,6 +481,13 @@ pub enum IterWorkerSel {
         /// How the arch's KV layout is charged; see [`KvAccountingSpec`].
         #[serde(flatten)]
         kv_accounting: KvAccountingSpec,
+        /// Content-level retained KV with a host tier; absent keeps session entries.
+        #[serde(flatten)]
+        context_cache: ContextCacheSpec,
+        /// Which waiting prompt starts next.
+        #[serde(default = "fifo_pending_order")]
+        #[param(string, default = "fifo", choices = PENDING_ORDER_CHOICES)]
+        pending_order: PendingOrderKind,
         /// Chunked-prefill cap: max tokens per batch.
         max_batch_tokens: u32,
         /// How resident decode shares an iteration with chunked prefill.

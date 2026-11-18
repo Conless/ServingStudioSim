@@ -1,0 +1,118 @@
+schema_version: 1
+pack: glm53_flash_nvfp4_b200_sglang_dp2
+description: GLM-5.3-Flash NVFP4 on B200 under SGLang with DP attention, TP2/DP2/EP2, the deployment of
+  the Premix paper's GLM DP2 runs. Two operating points per iteration timing -- long chunked prefill and
+  prefill mixed with decode -- simulated with the vLLM-structured GLM-5.3 NVFP4 DP-attention arch, so the
+  capture measures how far that arch is from SGLang.
+recorded_on:
+  host: cayenne
+  gpu: NVIDIA B200
+  checkpoint_snapshots: {glm53_flash_nvfp4: models--nvidia--GLM-5.3-Flash-NVFP4/snapshots/da920bb0b9f4a06727223a349e55468e38352348}
+  nsys_version: 2025.5.2
+  device_roles: {primary: '0,1'}
+variants:
+  dp2_ep2_sglang:
+    deployment: unified
+    gpu: NVIDIA B200
+    replicas: 1
+    checkpoint: glm53_flash_nvfp4
+    engine: sglang
+    # `openai`: `vllm_tokens` appends --tokens-only, which sglang.launch_server lacks.
+    backend: openai
+    python_runtime:
+      lock_timeout_seconds: 3600.0
+      install_timeout_seconds: 1800.0
+      # The Premix paper's SGLang (rg-bm-all bd522d5dc2 + the VibeSim alignment commits) runs FlashInfer 0.6.18;
+      # its prebuilt cubin + cu130 JIT-cache wheels of the same version, so no kernel compiles at runtime.
+      packages:
+      - {name: nvtx, version: 0.2.17, index_url: https://pypi.org/simple}
+      - {name: flashinfer-python, version: 0.6.18, index_url: https://pypi.org/simple}
+      - {name: flashinfer-cubin, version: 0.6.18, index_url: https://flashinfer.ai/whl}
+      - name: flashinfer-jit-cache
+        version: 0.6.18
+        local_version: cu130
+        index_url: https://flashinfer.ai/whl/cu130
+        required_files:
+        - flashinfer_jit_cache/jit_cache/fp4_quantization_100/fp4_quantization_100.so
+        - flashinfer_jit_cache/jit_cache/trtllm_comm/trtllm_comm.so
+        - flashinfer_jit_cache/jit_cache/fused_moe_trtllm_sm100/fused_moe_trtllm_sm100.so
+      environment:
+        FLASHINFER_DISABLE_JIT: '1'
+    run_name_prefix: glm53_flash_b200_dp2_sglang
+    server:
+      # SGLang DP attention: --tp 2 --dp 2 runs two attention ranks inside one TP2 group on two GPUs.
+      tp_size: 2
+      dp_size: 2
+      expert_parallel_size: 2
+      expert_count_reduction_group_size: 2
+      chunk_size: 8192
+      # The paper runs' DEF arm, minus the hierarchical cache (no host tier in an iteration capture).
+      extra_args: [--enable-dp-attention, --ep-size, '2', --mamba-radix-cache-strategy, extra_buffer]
+    arch:
+      type: glm53_flash_vllm_nvfp4_dp_attn_ep_moe
+      model_config: model/config/glm53_flash_nvfp4.json
+      fp8: false
+      ep_size: 2
+      routing: corpus
+      token_corpus_file: hf://datasets/UW-SyFI/servingstudio-workload@c3f5ecaab0bbff757c64864bf2ec24f5e1f76b5c/glm53_flash_fp8/vllm/balanced_c32/capture/20260924/manifest.json
+    worker:
+      type: chunked_prefill
+      max_batch_tokens: 8192
+      # SGLang runs an extend batch or a decode batch, never both (enable_mixed_chunk=False).
+      batch_policy: separate-prefill-priority
+      kv_admission_policy: bounded-future
+      kv_page_size: 1
+      kv_max_future_tokens: 4096
+      kv_initial_new_token_ratio: 0.7
+      kv_minimum_new_token_ratio: 0.098
+      kv_new_token_ratio_decay_steps: 600
+      kv_retract_decode_steps: 20
+      decode_retraction_policy: length
+    profile_passes:
+    - {kind: workload_metrics, name: profile_workload, trace: workload}
+    - {kind: nsys, name: profile_nsys, trace: kernel}
+    input_builder: {type: engine_text, measured_phase: forward, group_assignment: per_dp_rank}
+    label_rules: label_rules/manifest.json
+cases:
+- index: 1
+  name: long_prefill_c8
+  variant: dp2_ep2_sglang
+  purpose: Full 8192-token chunks over prefixes up to 64k, the iterations that set TTFT in the paper runs.
+  coverage: [chunked_prefill, long_context]
+  max_model_len: 73728
+  max_concurrency: 8
+  profile_arrival_mode: saturated
+  simulation_arrival_mode: saturated
+  gpu_memory_utilization: 0.8189
+  capture_seconds: 30.0
+  device_role: primary
+  workload_trace:
+    file: traces/01_long_prefill_c8.csv
+    shapes: [[8192, 16], [16384, 16], [32768, 16], [65536, 16]]
+    repeats: 8
+  attn_gpu_memory_gb:
+    value: 48.8
+    status: provisional
+    derived_from: autoresearch/notes/bigmodel port table (DP2/EP2 pool per GPU); replace with max_total_num_tokens from profile_workload.
+    evidence: autoresearch/notes/bigmodel/recon_policy.md
+- index: 2
+  name: mixed_decode_c32
+  variant: dp2_ep2_sglang
+  purpose: Partial chunks and decode batches at moderate concurrency.
+  coverage: [decode, partial_chunks]
+  max_model_len: 32768
+  max_concurrency: 32
+  profile_arrival_mode: saturated
+  simulation_arrival_mode: saturated
+  gpu_memory_utilization: 0.8189
+  capture_seconds: 30.0
+  device_role: primary
+  workload_trace:
+    file: traces/02_mixed_decode_c32.csv
+    shapes: [[1024, 256], [4096, 256], [8192, 128], [16384, 128]]
+    repeats: 16
+  attn_gpu_memory_gb:
+    value: 48.8
+    status: provisional
+    derived_from: as case 1.
+    evidence: autoresearch/notes/bigmodel/recon_policy.md

@@ -577,6 +577,8 @@ pub struct WorkerConfig {
     /// Whether and how completed-session KV uses the dynamically available
     /// attention slack. This never adds capacity beyond `attn_kv_bytes`.
     pub prefix_cache: crate::worker::kv::PrefixCacheConfig,
+    /// Serve retained KV from a content-level cache instead of session entries.
+    pub context_cache: Option<crate::worker::kv::ContextCacheConfig>,
     /// Whether KV charges include the serving engine's own allocation (padding,
     /// state copies, engine blocks, in-flight window tokens).
     pub kv_overhead: crate::worker::kv::KvOverhead,
@@ -628,6 +630,7 @@ impl Default for WorkerConfig {
             kv_admission: crate::worker::config::KvAdmissionConfig::FullFootprint,
             balance_decode_microbatches: false,
             prefix_cache: crate::worker::kv::PrefixCacheConfig::default(),
+            context_cache: None,
             kv_overhead: crate::worker::kv::KvOverhead::Vllm,
             prefix_resume_points: None,
             prefix_resume_interval: None,

@@ -51,6 +51,20 @@ from .config import IdleWaitConfig, ProfileConfig, ServerConfig
 
 SGLANG_SOURCE_ROOT = Path(__file__).resolve().parent / "sglang" / "python"
 
+
+def sglang_source_root(fork_python: str) -> Path:
+    """The SGLang `python/` source tree the fork venv belongs to.
+
+    A fork venv lives inside its checkout's `python/` directory
+    (`<checkout>/python/<venv>/bin/python`, as `.venv-sglang` does in the
+    submodule), so that tree is the source the server must import. A venv
+    elsewhere falls back to the submodule.
+    """
+    candidate = Path(os.path.abspath(fork_python)).parents[2]
+    if (candidate / "sglang" / "__init__.py").is_file():
+        return candidate
+    return SGLANG_SOURCE_ROOT
+
 HEALTH_ENDPOINTS = ("/health", "/v1/models")
 
 # Nothing to add at launch: SGLang takes the profiler activity per request, so
@@ -178,7 +192,7 @@ def build_server_env(
 
     venv_bin = str(Path(fork_python).parent)
     env["PATH"] = os.pathsep.join([venv_bin, env.get("PATH", "")])
-    env["PYTHONPATH"] = str(SGLANG_SOURCE_ROOT)
+    env["PYTHONPATH"] = str(sglang_source_root(fork_python))
     env["CUDA_VISIBLE_DEVICES"] = cuda_visible_devices
     env["SGLANG_ENABLE_VIBESIM_ALIGNMENT"] = "1"
     # The `sglang_iteration(N): forward` range rides SGLang's own per-subsystem
@@ -257,7 +271,7 @@ def write_launch_metadata(
         "nsys_profiler": profiler_provenance,
         "python_runtime": runtime_provenance,
         "fork_python": fork_python,
-        "fork_git": _git_info(SGLANG_SOURCE_ROOT.parent),
+        "fork_git": _git_info(sglang_source_root(fork_python).parent),
     }
     Path(path).write_text(json.dumps(metadata, indent=2))
 

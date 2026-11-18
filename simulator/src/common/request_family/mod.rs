@@ -25,7 +25,7 @@ pub use audio_to_text::{
     AudioToTextRequest,
 };
 pub use autoregressive::{
-    AcceptanceProfile, DecodingStrategy, SessionInput, TextGenerationProgress,
+    AcceptanceProfile, ContextRef, DecodingStrategy, SessionInput, TextGenerationProgress,
 };
 pub use generated_media::GeneratedMediaProgress;
 pub use image_to_text::{

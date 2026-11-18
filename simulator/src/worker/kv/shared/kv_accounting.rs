@@ -31,6 +31,7 @@ use anyhow::ensure;
 use serde::{Deserialize, Serialize};
 
 use crate::arch::kv_layout::{KvCacheLayout, KvCachePart, KvGrowth};
+use crate::worker::kv::shared::context_cache::ContextCacheSizes;
 
 /// Whether KV charges include what the serving engine allocates on top of the
 /// model's own state.
@@ -545,6 +546,28 @@ impl KvAccounting {
             PrefixResumePoints::EveryBlock => ([None, None], Some(block)),
         };
         ResumePositions::new(explicit, every, context_tokens)
+    }
+
+    /// What one token and one resumable state cost a content-level cache, in bytes.
+    pub(crate) fn context_cache_sizes(&self) -> ContextCacheSizes {
+        let per_token: f64 = self
+            .per_token
+            .iter()
+            .map(|part| part.units_per_entry as f64 / part.tokens_per_entry as f64)
+            .sum();
+        let tails: u64 = self
+            .windows
+            .iter()
+            .filter(|part| part.prefix_reusable)
+            .map(|part| part.units_per_token * (part.window_tokens - 1))
+            .sum();
+        ContextCacheSizes {
+            bytes_per_token: (per_token * self.bytes_per_unit as f64).ceil() as u64,
+            bytes_per_state: (self.reusable_state_units + tails) * self.bytes_per_unit,
+            bytes_per_unit: self.bytes_per_unit,
+            capacity_units: self.capacity_units,
+            checkpoint_interval: self.resume_interval.map(|interval| interval as u32),
+        }
     }
 
     /// Units a retained entry occupies: the per-token parts up to its last

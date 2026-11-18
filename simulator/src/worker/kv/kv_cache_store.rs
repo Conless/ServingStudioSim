@@ -33,6 +33,7 @@ use crate::log::{
     KvSampler, KvSubmit, PrefixCacheActivation, PrefixCacheEvent, PrefixCacheEventKind,
     PrefixCacheEvictionReason, PrefixCacheLogger, PrefixCacheRetentionReason,
 };
+use crate::worker::kv::shared::context_cache::ContextCache;
 use crate::worker::kv::shared::kv_accounting::SharedKvAccounting;
 use crate::worker::kv::shared::prefix_cache::{
     PrefixCache, PrefixCacheBudget, PrefixCacheMutation, PrefixCacheReturnMetadata,
@@ -40,6 +41,7 @@ use crate::worker::kv::shared::prefix_cache::{
 use crate::worker::kv::shared::prefix_cache_journal::PrefixCacheJournal;
 use crate::worker::kv::shared::request_ledger::RequestLedger;
 use crate::worker::kv::shared::resident_partition::ResidentPartitionState;
+use crate::worker::kv::ContextCacheConfig;
 use crate::worker::kv::{
     ChunkedPrefillKv, HandoffKv, IterWorkerKv, KvStore, PrefixKv, ResolvedPrefillContext,
     SlotPipelineKv,
@@ -71,6 +73,8 @@ pub struct KvCacheStore {
     ledger: RequestLedger,
     /// Evictable completed-session KV, local to each attention partition.
     prefix_caches: Vec<PrefixCache>,
+    /// Replaces `prefix_caches` when the worker asks for a content-level cache.
+    context_caches: Vec<ContextCache>,
     journal: PrefixCacheJournal,
     sampler: Option<KvSampler>,
 }
@@ -176,6 +180,21 @@ impl IterWorkerKv for KvCacheStore {
         KvCacheStore::release_external(self, request, current_kv)
     }
 
+    fn iteration_load_end(&self) -> Option<Time> {
+        if self.context_caches.is_empty() {
+            return None;
+        }
+        let mut load_end = None::<f64>;
+        for (partition, cache) in self.context_caches.iter().enumerate() {
+            for request in self.prefill_admits(partition as PartitionId) {
+                if let Some(end) = cache.load_end_s(request) {
+                    load_end = Some(load_end.map_or(end, |value| value.max(end)));
+                }
+            }
+        }
+        load_end.map(Time::from_s)
+    }
+
     fn visit_prefill_admits(&self, partition: PartitionId, mut visitor: impl FnMut(RequestId)) {
         for request in self.prefill_admits(partition) {
             visitor(request);
@@ -274,7 +293,7 @@ impl ChunkedPrefillKv for KvCacheStore {
             .live_checkpoint_units()
             .min(slack_after_step);
         let cache_limit = slack_after_step - live_checkpoints;
-        let evictions = self.prefix_caches[partition as usize].shrink_to(cache_limit);
+        let evictions = self.shrink_retained(partition, cache_limit, now);
         for eviction in evictions {
             self.journal.record_mutation(
                 trigger,
@@ -285,7 +304,7 @@ impl ChunkedPrefillKv for KvCacheStore {
                 0,
             );
         }
-        let cache_units = self.prefix_caches[partition as usize].used_units();
+        let cache_units = self.retained_units(partition);
         let available = capacity.saturating_sub(protected.saturating_add(cache_units));
         required.saturating_sub(available)
     }
@@ -327,6 +346,19 @@ impl ChunkedPrefillKv for KvCacheStore {
 
     fn complete_prefill_chunk(&mut self, request: RequestId) {
         self.ledger.complete_prefill_chunk(request);
+        if !self.context_caches.is_empty() {
+            let context = self
+                .ledger
+                .prefill_context(request)
+                .expect("chunked prefill context must exist");
+            let position =
+                context.post_prefill_context_tokens() - context.remaining_prefill_tokens();
+            let partition = self
+                .ledger
+                .placement(request)
+                .expect("a running chunk has a placement");
+            self.context_caches[partition as usize].note_chunk_end(request, position);
+        }
     }
 
     fn finish_chunked_prefill(
@@ -352,6 +384,15 @@ impl ChunkedPrefillKv for KvCacheStore {
 
 impl PrefixKv for KvCacheStore {
     fn retained_prefix_partition(&self, session_input: SessionInput) -> Option<PartitionId> {
+        if !self.context_caches.is_empty() {
+            // A session stays where it started, even with nothing left there.
+            let session_id = session_input.session_id()?;
+            return self
+                .context_caches
+                .iter()
+                .position(|cache| cache.owns_session(session_id))
+                .map(|partition| partition as PartitionId);
+        }
         let (session_id, declared_prefix_tokens) = match session_input {
             // A pinned prefix is resident on every partition, so it creates no
             // placement affinity.
@@ -389,6 +430,9 @@ impl PrefixKv for KvCacheStore {
             // Declared resident on arrival: a hit regardless of this
             // partition's cache. Admission reserves it with the request.
             SessionInput::PinnedPrefix { prefix_tokens } => prefix_tokens,
+            SessionInput::Session { .. } if !self.context_caches.is_empty() => {
+                self.context_caches[partition as usize].peek(session_input)
+            }
             SessionInput::Session {
                 session_id,
                 declared_prefix_tokens,
@@ -407,8 +451,16 @@ impl PrefixKv for KvCacheStore {
         now: Time,
     ) {
         if let Some(session_id) = resolved_prefill.session_id() {
-            let take_result = self.prefix_caches[partition as usize]
-                .take(session_id, resolved_prefill.declared_prefix_tokens());
+            let take_result = if self.context_caches.is_empty() {
+                self.prefix_caches[partition as usize]
+                    .take(session_id, resolved_prefill.declared_prefix_tokens())
+            } else {
+                self.context_caches[partition as usize].begin(
+                    request,
+                    resolved_prefill.session_input(),
+                    now.as_s(),
+                )
+            };
             // `ResolvedPrefillContext::new` borrows one token back from a fully
             // resident prefix so that a zero-length prefill never reaches the
             // model. The entry's position still sits at the boundary, so the
@@ -465,7 +517,7 @@ impl SlotPipelineKv for KvCacheStore {
         self.partitions[partition as usize].projected_peak_units()
             + self.ledger.partition_promised(partition)
             + self.ledger.partition_held(partition)
-            + self.prefix_caches[partition as usize].used_units()
+            + self.retained_units(partition)
     }
 
     fn has_reservation(&self, request: RequestId) -> bool {
@@ -499,6 +551,15 @@ impl KvCacheStore {
         )
     }
 
+    /// Serve retained KV from a content-level cache instead of session entries.
+    pub(crate) fn with_context_cache(mut self, config: ContextCacheConfig) -> Self {
+        let sizes = self.accounting.context_cache_sizes();
+        self.context_caches = (0..self.partitions.len())
+            .map(|_| ContextCache::new(config, sizes))
+            .collect();
+        self
+    }
+
     pub(crate) fn new(
         num_partitions: usize,
         accounting: SharedKvAccounting,
@@ -514,6 +575,7 @@ impl KvCacheStore {
             prefix_caches: (0..num_partitions)
                 .map(|_| PrefixCache::new(accounting.clone(), prefix_cache))
                 .collect(),
+            context_caches: Vec::new(),
             journal: PrefixCacheJournal::new(prefix_cache_logger),
             sampler,
             accounting,
@@ -562,8 +624,12 @@ impl KvCacheStore {
         self.ledger
             .promise(request, partition, footprint.reserved_units());
         let evictions = match footprint.basis {
-            ReservationBasis::FullFootprint => self.trim_prefix_cache_to_physical_slack(partition),
-            ReservationBasis::BoundedFuture => self.trim_prefix_cache_to_bounded_slack(partition),
+            ReservationBasis::FullFootprint => {
+                self.trim_prefix_cache_to_physical_slack(partition, now)
+            }
+            ReservationBasis::BoundedFuture => {
+                self.trim_prefix_cache_to_bounded_slack(partition, now)
+            }
         };
         for eviction in evictions {
             self.journal.record_mutation(
@@ -748,7 +814,7 @@ impl KvCacheStore {
         if self.sampler.is_none() {
             return;
         }
-        let retained_prefix_kv = self.prefix_caches[partition as usize].used_units();
+        let retained_prefix_kv = self.retained_units(partition);
         let live_checkpoints = self.clamped_live_checkpoint_units(partition);
         let held = self.ledger.partition_held(partition);
         let submit = KvSubmit {
@@ -844,17 +910,38 @@ impl KvCacheStore {
             .saturating_sub(self.clamped_live_checkpoint_units(partition))
     }
 
+    fn retained_units(&self, partition: PartitionId) -> u64 {
+        match self.context_caches.get(partition as usize) {
+            Some(cache) => cache.used_units(),
+            None => self.prefix_caches[partition as usize].used_units(),
+        }
+    }
+
+    fn shrink_retained(
+        &mut self,
+        partition: PartitionId,
+        limit: u64,
+        now: Time,
+    ) -> Vec<PrefixCacheMutation> {
+        match self.context_caches.get_mut(partition as usize) {
+            Some(cache) => cache.shrink_to(limit, now.as_s()),
+            None => self.prefix_caches[partition as usize].shrink_to(limit),
+        }
+    }
+
     fn trim_prefix_cache_to_physical_slack(
         &mut self,
         partition: PartitionId,
+        now: Time,
     ) -> Vec<PrefixCacheMutation> {
         let physical_limit = self.prefix_cache_physical_limit(partition);
-        self.prefix_caches[partition as usize].shrink_to(physical_limit)
+        self.shrink_retained(partition, physical_limit, now)
     }
 
     fn trim_prefix_cache_to_bounded_slack(
         &mut self,
         partition: PartitionId,
+        now: Time,
     ) -> Vec<PrefixCacheMutation> {
         let partition_state = &self.partitions[partition as usize];
         let protected = partition_state.resident_units()
@@ -862,7 +949,7 @@ impl KvCacheStore {
             + self.ledger.partition_held(partition);
         let slack = partition_state.capacity_units().saturating_sub(protected);
         let physical_limit = slack - partition_state.live_checkpoint_units().min(slack);
-        self.prefix_caches[partition as usize].shrink_to(physical_limit)
+        self.shrink_retained(partition, physical_limit, now)
     }
 
     fn retain_prefix(
@@ -877,20 +964,32 @@ impl KvCacheStore {
         retain_reason: PrefixCacheRetentionReason,
     ) {
         let physical_limit = self.prefix_cache_physical_limit(partition);
-        let insert_result = self.prefix_caches[partition as usize].insert(
-            session_id,
-            prompt_tokens,
-            tokens,
-            physical_limit,
-            cache_return_metadata,
-        );
+        let insert_result = if self.context_caches.is_empty() {
+            self.prefix_caches[partition as usize].insert(
+                session_id,
+                prompt_tokens,
+                tokens,
+                physical_limit,
+                cache_return_metadata,
+            )
+        } else {
+            let cache = &mut self.context_caches[partition as usize];
+            let mut result = cache.finish(request, prompt_tokens as u32, now.as_s());
+            result
+                .mutations
+                .extend(cache.shrink_to(physical_limit, now.as_s()));
+            result
+        };
         for mutation in insert_result.mutations {
             let event_kind = PrefixCacheJournal::retain_event_kind(mutation.kind, retain_reason);
             self.journal
                 .record_mutation(request, partition, now, mutation, event_kind, tokens);
         }
         if insert_result.retained_tokens == 0 {
-            let cache_used = self.prefix_caches[partition as usize].used_tokens();
+            let cache_used = match self.context_caches.get(partition as usize) {
+                Some(cache) => cache.used_tokens(),
+                None => self.prefix_caches[partition as usize].used_tokens(),
+            };
             self.journal.record(PrefixCacheEvent {
                 partition_id: partition,
                 time: now,
@@ -956,6 +1055,7 @@ mod tests {
                 session_id: 7,
                 session_start_time: Time::ZERO,
                 declared_prefix_tokens: 100,
+                context: Default::default(),
             },
         );
         assert_eq!(resolved_prefill.resident_prefix_tokens(), 0);
@@ -980,6 +1080,7 @@ mod tests {
                 session_id: 7,
                 session_start_time: Time::ZERO,
                 declared_prefix_tokens: 60,
+                context: Default::default(),
             }),
             Some(2)
         );
@@ -988,6 +1089,7 @@ mod tests {
                 session_id: 7,
                 session_start_time: Time::ZERO,
                 declared_prefix_tokens: 40,
+                context: Default::default(),
             }),
             Some(1),
             "equal reusable lengths keep the lowest partition deterministic"
@@ -1036,6 +1138,7 @@ mod tests {
             session_id: 7,
             session_start_time: Time::ZERO,
             declared_prefix_tokens: 0,
+            context: Default::default(),
         };
         let resolved_prefill = kv_store.preview_prefill_context(0, 80, session_input);
         let session_footprint = kv_store.footprint(RequestId(0), 80, 0);
@@ -1222,6 +1325,7 @@ mod tests {
                 session_id: 7,
                 session_start_time: Time::ZERO,
                 declared_prefix_tokens: 50,
+                context: Default::default(),
             },
         );
         assert_eq!(resolved_prefill.resident_prefix_tokens(), 50);
@@ -1467,6 +1571,7 @@ mod tests {
             session_id: 7,
             session_start_time: Time::ZERO,
             declared_prefix_tokens: 0,
+            context: Default::default(),
         };
         let finish = |resume_points| {
             let mut kv_store = state_store(
@@ -1674,6 +1779,7 @@ mod tests {
             session_id: 7,
             session_start_time: Time::ZERO,
             declared_prefix_tokens: 0,
+            context: Default::default(),
         };
         let resolved = kv_store.preview_prefill_context(0, 8_000, session);
         let footprint = kv_store.footprint(RequestId(0), 8_000, 500);
@@ -1693,6 +1799,7 @@ mod tests {
             session_id: 7,
             session_start_time: Time::ZERO,
             declared_prefix_tokens: 8_500,
+            context: Default::default(),
         };
         let resolved = kv_store.preview_prefill_context(0, 100, next_turn);
         assert_eq!(resolved.resident_prefix_tokens(), 7_999);

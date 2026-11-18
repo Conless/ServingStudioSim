@@ -209,7 +209,7 @@ def load_profile_config(path: Path, *, require_python_runtime: bool = True) -> P
     visible_devices = [
         device.strip() for device in config.cuda_visible_devices.split(",") if device.strip()
     ]
-    world_size = config.server.tp_size * config.server.dp_size
+    world_size = config.device_count
     expert_topology = {
         "expert_parallel_size": config.server.expert_parallel_size,
         "expert_count_reduction_group_size": (config.server.expert_count_reduction_group_size),
@@ -278,12 +278,13 @@ def load_profile_config(path: Path, *, require_python_runtime: bool = True) -> P
         if world_size % value != 0:
             raise ValueError(
                 f"invalid profile config: server.{field_name} must divide "
-                f"tp_size * dp_size={world_size}"
+                f"the server's device count {world_size}"
             )
     if len(visible_devices) != world_size:
         raise ValueError(
             "invalid profile config: cuda_visible_devices must contain exactly "
-            f"tp_size * dp_size={world_size} devices; found {visible_devices}"
+            f"the server's {world_size} devices (tp_size * dp_size, or tp_size under "
+            f"SGLang DP attention); found {visible_devices}"
         )
     if len(set(visible_devices)) != len(visible_devices):
         raise ValueError("invalid profile config: cuda_visible_devices contains duplicates")

@@ -8,6 +8,7 @@
 
 mod arrival;
 mod pinned_prefix;
+mod prefix_rounds;
 mod release;
 mod schema;
 
@@ -1225,6 +1226,7 @@ mod tests {
                 session_id: 0,
                 session_start_time: Time::from_ms(4.0),
                 declared_prefix_tokens: 512,
+                context: Default::default(),
             }
         );
         assert_eq!(

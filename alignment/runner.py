@@ -17,6 +17,7 @@ finalize the `.nsys-rep` cleanly on shutdown.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import os
 import shutil
@@ -674,6 +675,7 @@ def _finalize_profile(
     is_routing = cfg.profile_kind in ROUTING_PROFILE_KINDS
     is_workload_metrics = cfg.profile_kind == "workload_metrics"
     driver, records, _ = _engine(cfg)
+    records = dataclasses.replace(records, scheduler_group_size=cfg.scheduler_group_size)
 
     speculative = driver.speculative_decode_enabled(cfg.server)
     spec_artifacts = {}
@@ -836,7 +838,7 @@ def _finalize_profile(
         tp_size=cfg.server.tp_size,
         dp_rank_by_device=dp_rank_by_device,
     )
-    expected_device_count = cfg.server.tp_size * cfg.server.dp_size
+    expected_device_count = cfg.device_count
     if len(parsed["device_ids"]) != expected_device_count:
         raise RuntimeError(
             "normalized NSYS device population does not match server parallelism: "

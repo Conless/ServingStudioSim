@@ -14,6 +14,7 @@ mod kv_cache_store;
 mod shared;
 
 pub use kv_cache_store::KvCacheStore;
+pub use shared::context_cache::{ContextCacheConfig, ContextCachePolicy};
 pub(crate) use shared::kv_accounting::{KvAccounting, KvAccountingOptions, SharedKvAccounting};
 pub use shared::kv_accounting::{KvOverhead, PrefixResumePoints};
 pub use shared::kv_cache_report::KvCacheReport;
@@ -22,6 +23,7 @@ pub use shared::prefix_cache::{PrefixCacheConfig, PrefixCacheMode, PrefixCachePo
 /// KV-owned runtime facts for one request's prefill on one partition.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ResolvedPrefillContext {
+    session_input: SessionInput,
     session_id: Option<u32>,
     declared_prefix_tokens: u32,
     resident_prefix_tokens: u32,
@@ -63,6 +65,7 @@ impl ResolvedPrefillContext {
             .checked_add(declared_prefix_tokens)
             .expect("post-prefill context token count overflow");
         Self {
+            session_input,
             session_id: session_input.session_id(),
             declared_prefix_tokens,
             resident_prefix_tokens,
@@ -77,6 +80,10 @@ impl ResolvedPrefillContext {
     /// `None` for a standalone request — nothing to look up or retain.
     pub(crate) fn session_id(self) -> Option<u32> {
         self.session_id
+    }
+
+    pub(crate) fn session_input(self) -> SessionInput {
+        self.session_input
     }
 
     pub fn resident_prefix_tokens(self) -> u32 {
@@ -299,6 +306,12 @@ pub trait IterWorkerKv: KvStore {
     /// the analogue of vLLM's per-engine `kv_cache_usage`.
     fn kv_usage(&self, partition: PartitionId) -> f64;
     fn release_external(&mut self, request: RequestId, current_kv: u64) -> Option<PartitionId>;
+
+    /// When the host loads this iteration's prefills need have finished. An
+    /// iteration starts no earlier. `None` when nothing is loading.
+    fn iteration_load_end(&self) -> Option<Time> {
+        None
+    }
 
     /// Static-dispatch iteration over this iteration's fresh prefills.
     fn visit_prefill_admits(&self, partition: PartitionId, visitor: impl FnMut(RequestId));

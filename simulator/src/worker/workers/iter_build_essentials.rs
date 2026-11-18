@@ -77,13 +77,17 @@ pub(crate) fn kv_cache_store(
     let prefix_cache = config
         .prefix_cache
         .resolve_units(&accounting, num_attn_shards);
-    KvCacheStore::new(
+    let store = KvCacheStore::new(
         num_partitions,
         accounting,
         prefix_cache,
         sampler,
         prefix_cache_logger,
-    )
+    );
+    match config.context_cache {
+        Some(context_cache) => store.with_context_cache(context_cache),
+        None => store,
+    }
 }
 
 /// The token boundary non-final prefill chunks end on, if any: the layout's

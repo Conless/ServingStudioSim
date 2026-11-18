@@ -1243,7 +1243,8 @@ def test_every_pack_case_device_role_is_recorded_with_the_right_width(pack):
     Host profiles are local files — a real one is absolute paths to an HF cache
     and a corpus — so this cannot be checked against the machine itself. What it
     can check is that the split the pack *claims* is internally consistent: a
-    role must name exactly `tp_size * dp_size` distinct devices, which is the
+    role must name exactly the server's distinct devices (`tp_size * dp_size`,
+    or `tp_size` under SGLang DP attention), which is the
     error a copied case would introduce.
     """
     roles = pack.recorded_on.get("device_roles", {})
@@ -1252,8 +1253,7 @@ def test_every_pack_case_device_role_is_recorded_with_the_right_width(pack):
         variant = pack.variant_of(case)
         assert case.device_role in roles, f"{case.slug}: role not in recorded_on"
         devices = str(roles[case.device_role]).split(",")
-        world = int(variant.server.get("tp_size", 1)) * int(variant.server.get("dp_size", 1))
-        assert len(devices) == world, case.slug
+        assert len(devices) == check_module._device_count(variant), case.slug
         assert len(set(devices)) == len(devices), case.slug
 
 

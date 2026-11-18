@@ -576,6 +576,9 @@ def _draft_gap_rows(con: sqlite3.Connection, indexed_rows: list[list]) -> list[l
     return owned
 
 
+_SQL_ID_BATCH = 30000
+
+
 def attach_kernels_by_correlation(
     con: sqlite3.Connection,
     string_ids: dict[int, str],
@@ -608,27 +611,35 @@ def attach_kernels_by_correlation(
         if not correlation_ids:
             continue
 
-        placeholders = ",".join("?" for _ in correlation_ids)
-        params = [item.worker.global_pid, *correlation_ids]
-        query = f"""
-            SELECT
-                k.start,
-                k.end,
-                k.demangledName,
-                k.streamId,
-                k.correlationId
-            FROM CUPTI_ACTIVITY_KIND_KERNEL k
-            WHERE k.globalPid = ?
-              AND k.correlationId IN ({placeholders})
-            ORDER BY k.start
-        """
+        # An uncaptured forward can launch more kernels than SQLite binds in one
+        # statement (32766 variables), so match the ids in batches and restore
+        # the single query's start order.
+        rows = []
+        for offset in range(0, len(correlation_ids), _SQL_ID_BATCH):
+            batch = correlation_ids[offset : offset + _SQL_ID_BATCH]
+            placeholders = ",".join("?" for _ in batch)
+            rows += con.execute(
+                f"""
+                SELECT
+                    k.start,
+                    k.end,
+                    k.demangledName,
+                    k.streamId,
+                    k.correlationId
+                FROM CUPTI_ACTIVITY_KIND_KERNEL k
+                WHERE k.globalPid = ?
+                  AND k.correlationId IN ({placeholders})
+                """,
+                [item.worker.global_pid, *batch],
+            ).fetchall()
+        rows.sort(key=lambda row: (row[0], row[4]))
         for (
             start,
             end,
             name,
             stream_id,
             correlation_id,
-        ) in con.execute(query, params):
+        ) in rows:
             kernel_rows += 1
             start = int(start)
             end = int(end)
@@ -807,7 +818,15 @@ def _device_step_windows(
         grouped[(item.worker.device_id, item.iteration)].append(item)
     by_device: dict[int | None, list[DeviceStepWindow]] = defaultdict(list)
     for (device_id, iteration), items in grouped.items():
-        kernel_intervals = [interval for item in items for interval in item.intervals]
+        # The forward is the work every rank runs in step; later phases may
+        # launch kernels that queue behind the *next* forward under overlap
+        # scheduling, stretching the window across two steps.
+        forward_intervals = [
+            interval for item in items if item.phase == "forward" for interval in item.intervals
+        ]
+        kernel_intervals = forward_intervals or [
+            interval for item in items for interval in item.intervals
+        ]
         if use_kernel_time and kernel_intervals:
             start = min(start for start, _ in kernel_intervals)
             end = max(end for _, end in kernel_intervals)

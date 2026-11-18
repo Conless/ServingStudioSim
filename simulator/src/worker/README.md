@@ -167,6 +167,15 @@ never enters `fits` or `kv_usage`, and they win the slack over retained
 entries. The implementation lives in `kv/shared/prefix_cache.rs`;
 `kv/kv_cache_store.rs` owns the combined ledger and capacity gate.
 
+`chunked_prefill` can replace those entries with a content-level cache:
+`context_cache` selects `kv/shared/context_cache/`, each session's token tree with
+KV and states resident per tier, HBM and host (`host_cache_gb`,
+`host_link_gb_per_s`, `host_write_through`, `state_pool_share`). `lru` is SGLang's
+per-component replacement, `price-graph` an online value-per-byte policy that
+needs `recompute_alpha_s` and `recompute_beta_s`. The store dispatches to it from
+the same seams, and `IterBatchWorker` delays an iteration until its host loads
+land (`IterWorkerKv::iteration_load_end`).
+
 The same combined accounting feeds `kv_snapshot`, in KV units: `active_kv`
 remains total committed attention KV (live checkpoints included), while `retained_prefix_kv` exposes its retained-cache
 component. The sampler keeps both values from the same throttle-window peak

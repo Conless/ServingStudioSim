@@ -98,7 +98,7 @@ def host_for(pack: Pack, host: HostProfile | None) -> HostProfile:
             if key is None:
                 continue
             checkpoints.setdefault(key, f"/nonexistent/checkpoints/{key}")
-        world_size = int(variant.server.get("tp_size", 1)) * int(variant.server.get("dp_size", 1))
+        world_size = _device_count(variant)
         for case in pack.cases:
             if case.variant != variant.name:
                 continue
@@ -106,6 +106,15 @@ def host_for(pack: Pack, host: HostProfile | None) -> HostProfile:
     from dataclasses import replace
 
     return replace(base, checkpoints=checkpoints, device_roles=roles)
+
+
+def _device_count(variant) -> int:
+    """GPUs the variant's server runs on; `ProfileConfig.device_count` states the rule."""
+    tp_size = int(variant.server.get("tp_size", 1))
+    dp_size = int(variant.server.get("dp_size", 1))
+    if variant.engine == "sglang" and "--enable-dp-attention" in variant.server.get("extra_args", []):
+        return tp_size
+    return tp_size * dp_size
 
 
 # ── trace invariants ─────────────────────────────────────────────────────────
@@ -638,12 +647,12 @@ def _check_cross_phase(pack: Pack, case: Case, documents: dict[str, Any]) -> lis
                         f"server {limit_flag} does not match the case")
             )
         devices = [item for item in document["cuda_visible_devices"].split(",") if item]
-        world = int(variant.server.get("tp_size", 1)) * int(variant.server.get("dp_size", 1))
+        world = _device_count(variant)
         if len(devices) != world:
             findings.append(
                 Finding("error", f"{where}.{profile_pass.name}",
                         f"device role {case.device_role!r} yields {len(devices)} devices "
-                        f"but tp*dp is {world}")
+                        f"but the server runs on {world}")
             )
     return findings
 

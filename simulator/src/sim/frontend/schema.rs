@@ -21,8 +21,9 @@ use super::arrival::{
     ReleaseMetadata, ScheduledRequest, SchedulingDeclaration, SessionReleaseMetadata,
 };
 use super::pinned_prefix::{self, TextGenerationIndependentRow};
+use super::prefix_rounds;
 use crate::common::{
-    AudioExtent, AudioTextGenerationDefinition, DecodingStrategy, ImageExtent,
+    AudioExtent, AudioTextGenerationDefinition, ContextRef, DecodingStrategy, ImageExtent,
     ImageGenerationDefinition, ImageTextGenerationDefinition, ImageToVideoDefinition,
     OmniGenerationDefinition, RequestDefinition, RequestId, SessionInput, SloContract,
     SpeechGenerationDefinition, TextGenerationDefinition, Time, VideoExtent,
@@ -81,6 +82,7 @@ fn parse_independent_metadata(
                     session_id,
                     session_start_time,
                     declared_prefix_tokens,
+                    context: ContextRef::default(),
                 },
             )
         }
@@ -209,6 +211,7 @@ impl TraceDefinition for TextGenerationDefinition {
             ),
             InputFileFormat::TextGenerationSessionExecutionV2 => {
                 let sessions = text_generation::session::load(path, input_file_schema)?;
+                let prefix_rounds = prefix_rounds::load(path)?;
                 output.reserve(sessions.iter().map(|(_, rounds)| rounds.len()).sum());
                 for (source_session_id, rounds) in sessions {
                     let session_id = source_identities.intern_session(&source_session_id);
@@ -222,6 +225,12 @@ impl TraceDefinition for TextGenerationDefinition {
                         .entry(session_id)
                         .or_insert(declared_session_start_time);
                     for round in rounds {
+                        let context = ContextRef {
+                            round: usize_to_u32(round.round_idx, "round_idx")?,
+                            prefix_round: prefix_rounds
+                                .get(&(source_session_id.clone(), round.round_idx))
+                                .copied(),
+                        };
                         let request_id = source_identities.intern_request(round.request_id);
                         let declared_prefix_tokens = usize_to_u32(round.prefix_len, "prefix_len")?;
                         output.push(ScheduledRequest {
@@ -245,6 +254,7 @@ impl TraceDefinition for TextGenerationDefinition {
                                     session_id,
                                     session_start_time,
                                     declared_prefix_tokens,
+                                    context,
                                 },
                                 decoding: round.speculative.strategy(),
                             },

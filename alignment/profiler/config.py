@@ -225,6 +225,29 @@ class ProfileConfig:
     workload: LoadGeneratorConfig = None  # type: ignore[assignment]
 
     @property
+    def device_count(self) -> int:
+        """GPUs the server runs on.
+
+        `tp_size * dp_size`, except under SGLang's DP attention: there the
+        `dp_size` attention ranks split the TP group instead of replicating it,
+        so the server runs on `tp_size` devices.
+        """
+        if self.engine == "sglang" and "--enable-dp-attention" in self.server.extra_args:
+            return self.server.tp_size
+        return self.server.tp_size * self.server.dp_size
+
+    @property
+    def scheduler_group_size(self) -> int | None:
+        """TP ranks that repeat one scheduler's records, when not the whole TP group.
+
+        Under SGLang's DP attention each of the `dp_size` attention ranks runs its
+        own scheduler over `tp_size / dp_size` consecutive TP ranks.
+        """
+        if self.engine == "sglang" and "--enable-dp-attention" in self.server.extra_args:
+            return self.server.tp_size // self.server.dp_size
+        return None
+
+    @property
     def captures_expert_load(self) -> bool:
         """Whether this pass will ask the engine for EPLB's expert-load stream.
 

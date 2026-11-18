@@ -14,8 +14,11 @@
 //!   held, resolved prefill context) and their per-partition sums.
 //! - [`prefix_cache`] — the evictable retained-session tier and its four
 //!   replacement policies.
+//! - [`context_cache`] — the content-level alternative: each session's token
+//!   tree, with KV and states resident per tier, HBM and host.
 //! - [`prefix_cache_journal`] — turning cache mutations into logged events.
 
+pub(crate) mod context_cache;
 pub(crate) mod kv_accounting;
 pub(crate) mod kv_cache_report;
 pub(crate) mod prefix_cache;

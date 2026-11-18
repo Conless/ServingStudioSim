@@ -173,7 +173,12 @@ where
             self.iteration_fsm.iteration as u64,
             now,
         );
-        now + cost
+        // Host loads must land before the batch runs: compute starts after them.
+        let start = self
+            .kv_store
+            .iteration_load_end()
+            .map_or(now, |load_end| load_end.max(now));
+        start + cost
     }
 
     fn next_wakeup(&self, now: Time) -> Option<Time> {
@@ -340,11 +345,13 @@ mod tests {
                 session_id: 10,
                 session_start_time: Time::from_ms_u64(10),
                 declared_prefix_tokens: 0,
+                context: Default::default(),
             };
             requests[RequestId(1)].request.definition.session = SessionInput::Session {
                 session_id: 1,
                 session_start_time: Time::from_ms_u64(1),
                 declared_prefix_tokens: 0,
+                context: Default::default(),
             };
         }
         let mut worker = worker_with(Rc::clone(&store), config_with_budget(8));
@@ -398,6 +405,7 @@ mod tests {
                     session_id: 7,
                     session_start_time: Time::ZERO,
                     declared_prefix_tokens: 100,
+                    context: Default::default(),
                 };
             }
         }
@@ -458,6 +466,7 @@ mod tests {
                     session_id: 7,
                     session_start_time: Time::ZERO,
                     declared_prefix_tokens: 100,
+                    context: Default::default(),
                 };
             }
         }
@@ -1232,6 +1241,7 @@ mod tests {
                         session_id: 7,
                         session_start_time: Time::ZERO,
                         declared_prefix_tokens: 100,
+                        context: Default::default(),
                     };
                 }
             }

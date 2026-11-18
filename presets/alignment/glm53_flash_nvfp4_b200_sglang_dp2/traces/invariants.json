@@ -1,0 +1,30 @@
+{
+  "note": "The traces themselves are not committed: they are `shapes` x `repeats` from campaign.yaml, and `alignment-campaign check` regenerates and compares against this record. Written by `check --update-invariants`, which only ever ADDS a trace. Re-recording an existing one means deleting its entry here first, on purpose, in a reviewable diff.",
+  "schema_version": 1,
+  "traces": {
+    "traces/01_long_prefill_c8.csv": {
+      "arrival_span_ms": 31000.0,
+      "distinct_request_ids": 32,
+      "distinct_shapes": 4,
+      "input_tokens": 983040,
+      "max_input_len": 65536,
+      "max_output_len": 16,
+      "max_total_len": 65552,
+      "output_tokens": 512,
+      "request_count": 32,
+      "sha256": "21dc9ef69edb74336372ec987d0e357a8dd2f77645a52316e1efda8cb703f722"
+    },
+    "traces/02_mixed_decode_c32.csv": {
+      "arrival_span_ms": 63000.0,
+      "distinct_request_ids": 64,
+      "distinct_shapes": 4,
+      "input_tokens": 475136,
+      "max_input_len": 16384,
+      "max_output_len": 256,
+      "max_total_len": 16512,
+      "output_tokens": 12288,
+      "request_count": 64,
+      "sha256": "7b54dae78bb9cdc0f151004662086498d7ad0c3bef862bb2304b3cf0d2d85872"
+    }
+  }
+}

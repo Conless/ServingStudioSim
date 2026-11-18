@@ -163,6 +163,15 @@ Step 3 also invents the arrival timeline — the corpus has no session arrival
 times — at a default `poisson`, 1 session/s, seed 0. The manifest records all
 three, so the timeline is reproducible rather than merely plausible.
 
+### Which round a prefix comes from
+
+`prefix_len` takes the prefix to be shared with the previous round. A content-level
+cache (`context_cache`, see `simulator/src/worker/README.md`) also follows rewinds
+to older branches and side lineages inside a session: a sidecar
+`<trace>.prefix_rounds.csv` next to the trace, with the header
+`session_id,round_idx,prefix_round`, names the source round of the rows that
+differ. Other caches ignore it.
+
 ### Prefill-only replay
 
 `session_to_prefill_only.py` turns either session trace into an independent

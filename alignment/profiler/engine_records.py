@@ -82,6 +82,11 @@ class EngineRecords:
     #: Captures the local rank among processes that repeat one scheduler event.
     #: Rank 0 owns the canonical copy. ``None`` means records are already unique.
     scheduler_record_rank_re: re.Pattern | None = None
+    #: Processes that repeat one scheduler's events: the TP ranks of one
+    #: attention group, numbered consecutively. ``None`` means the whole TP
+    #: group, so only rank 0 owns a record; SGLang DP attention splits the TP
+    #: group into one scheduler per DP rank (see `ProfileConfig`).
+    scheduler_group_size: int | None = None
     #: Unwraps the engine's request-id envelope back to the id the client sent.
     #: Tried in order; the first full match wins, otherwise the id is used as-is.
     request_id_unwrappers: tuple[re.Pattern, ...] = ()
@@ -121,7 +126,10 @@ class EngineRecords:
         if matched is None or matched.group(1) is None:
             # A tp_size=1 run writes no TP tag, so its sole scheduler owns it.
             return True
-        return int(matched.group(1)) == 0
+        rank = int(matched.group(1))
+        if self.scheduler_group_size is None:
+            return rank == 0
+        return rank % self.scheduler_group_size == 0
 
     def rank_of(self, line: str, *, dp_size: int) -> int:
         if self.rank_prefix_re is None:

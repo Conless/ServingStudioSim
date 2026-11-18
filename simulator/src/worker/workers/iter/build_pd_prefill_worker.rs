@@ -126,6 +126,7 @@ mod tests {
             session_id: 7,
             session_start_time: Time::ZERO,
             declared_prefix_tokens: 100,
+            context: Default::default(),
         };
         let mut worker = build_pd_prefill_worker(
             WorkerId(0),
@@ -211,6 +212,7 @@ mod tests {
                     session_id: 7,
                     session_start_time: Time::ZERO,
                     declared_prefix_tokens: 100,
+                    context: Default::default(),
                 };
             }
         }

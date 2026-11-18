@@ -181,6 +181,7 @@ mod tests {
                 session_id,
                 session_start_time: Time::ZERO,
                 declared_prefix_tokens,
+                context: Default::default(),
             },
             conversation_start_time: Time::ZERO,
             resident_prefix_tokens,

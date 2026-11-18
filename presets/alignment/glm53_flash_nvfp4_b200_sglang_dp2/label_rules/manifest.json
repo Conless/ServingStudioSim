@@ -1,0 +1,5 @@
+{
+ "schema_version": 2,
+ "rule_files": ["rules.json"],
+ "note": "Empty until the first capture: rules are read off the folded launch programs, not guessed from kernel names (alignment/labeling/README.md)."
+}

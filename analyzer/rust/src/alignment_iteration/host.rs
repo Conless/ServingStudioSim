@@ -219,18 +219,20 @@ impl HostTimeline {
 
         let mut ordered: Vec<&HostWindow> = windows.iter().collect();
         ordered.sort_by_key(|window| (window.start_ns, window.end_ns));
-        // Stabbing by binary search below is only correct while no window is
-        // contained in another. Adjacent iterations overlap; they must not nest.
-        for pair in ordered.windows(2) {
-            ensure!(
-                pair[1].end_ns >= pair[0].end_ns,
-                "iteration {} nests inside iteration {}; host attribution would miss it",
-                pair[1].iteration_id,
-                pair[0].iteration_id
-            );
-        }
+        // Windows may nest: under overlap scheduling a step's result-processing
+        // kernels queue behind the next forward, so its window can contain the
+        // next one. Stabbing searches the running maximum of the ends, which is
+        // ascending even then, and filters the candidate range by each window's
+        // own end. Without nesting the filter keeps every candidate.
         let lows: Vec<u64> = ordered.iter().map(|window| window.start_ns).collect();
         let highs: Vec<u64> = ordered.iter().map(|window| window.end_ns).collect();
+        let running_highs: Vec<u64> = highs
+            .iter()
+            .scan(0u64, |high, end| {
+                *high = (*high).max(*end);
+                Some(*high)
+            })
+            .collect();
 
         let mut by_iteration: BTreeMap<u64, IterationHost> = ordered
             .iter()
@@ -248,19 +250,18 @@ impl HostTimeline {
             })
             .collect();
 
-        // Both bounds ascending (asserted above), so the windows overlapping an
-        // event are one contiguous index range.
         //
         // Intervals are half-open here as everywhere else in this crate: an
         // event that ends exactly when a window opens has not entered it, and
         // counting it would put a zero-width row in that iteration's lane. The
         // `max(start + 1)` keeps a zero-duration call — nsys does emit them —
         // from belonging to no window at all.
+        let window_highs: &[u64] = &highs;
         let overlapping = |start: u64, end: u64| {
             let end = end.max(start + 1);
-            let first = highs.partition_point(|high| *high <= start);
+            let first = running_highs.partition_point(|high| *high <= start);
             let last = lows.partition_point(|low| *low < end);
-            first..last
+            (first..last).filter(move |slot| window_highs[*slot] > start)
         };
 
         for [thread_index, start, end, string_id] in &sidecar.nvtx_ranges {
@@ -464,10 +465,29 @@ mod tests {
     /// testable without a sidecar file on disk.
     fn overlapped_windows(windows: &[(u64, u64)], start: u64, end: u64) -> Vec<usize> {
         let highs: Vec<u64> = windows.iter().map(|(_, high)| *high).collect();
+        let running: Vec<u64> = highs
+            .iter()
+            .scan(0u64, |high, end| {
+                *high = (*high).max(*end);
+                Some(*high)
+            })
+            .collect();
         let lows: Vec<u64> = windows.iter().map(|(low, _)| *low).collect();
         let end = end.max(start + 1);
-        (highs.partition_point(|high| *high <= start)..lows.partition_point(|low| *low < end))
+        (running.partition_point(|high| *high <= start)..lows.partition_point(|low| *low < end))
+            .filter(|slot| highs[*slot] > start)
             .collect()
+    }
+
+    #[test]
+    fn a_nested_window_is_stabbed_by_events_inside_it_only() {
+        // A step whose result kernels queue behind the next forward contains it.
+        let windows = [(0, 300), (100, 200), (250, 400)];
+
+        assert_eq!(overlapped_windows(&windows, 120, 150), vec![0, 1]);
+        assert_eq!(overlapped_windows(&windows, 210, 240), vec![0]);
+        assert_eq!(overlapped_windows(&windows, 260, 280), vec![0, 2]);
+        assert_eq!(overlapped_windows(&windows, 310, 320), vec![2]);
     }
 
     #[test]

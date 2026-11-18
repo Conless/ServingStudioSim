@@ -1,5 +1,15 @@
 use crate::common::Time;
 
+/// Where one round of a session sits in the session's token tree.
+///
+/// The prefix a round declares comes from the previous finished round unless
+/// `prefix_round` names another. Only a content-level cache reads this.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ContextRef {
+    pub round: u32,
+    pub prefix_round: Option<u32>,
+}
+
 /// Conversation context declared for one autoregressive request.
 ///
 /// A session's identity, trace-declared start, and reusable-prefix requirement
@@ -22,6 +32,7 @@ pub enum SessionInput {
         /// Trace-declared reusable KV. This is a requirement, not an observed
         /// cache hit; a prefix-capable KV implementation must resolve it.
         declared_prefix_tokens: u32,
+        context: ContextRef,
     },
 }
 

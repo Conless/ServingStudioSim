@@ -32,7 +32,7 @@ use crate::orchestrator::config::{GroupSpec, PoolSpec};
 use crate::schema::ParamDef;
 use crate::timing_predict::{PredictGroup, SpeculativePredictGroup};
 use crate::worker::config::{
-    AttnWorkerSel, FfnWorkerSel, IterWorkerSel, KvAccountingSpec, KvAdmissionSpec,
+    AttnWorkerSel, ContextCacheSpec, FfnWorkerSel, IterWorkerSel, KvAccountingSpec, KvAdmissionSpec,
 };
 
 /// Serialize a `const PARAMS` slice to a JSON array of ParamDef objects.
@@ -88,6 +88,7 @@ pub fn list_params() -> Value {
                         ("hp_unified", KvAccountingSpec::PARAMS),
                         ("chunked_prefill", KvAccountingSpec::PARAMS),
                         ("chunked_prefill", KvAdmissionSpec::PARAMS),
+                        ("chunked_prefill", ContextCacheSpec::PARAMS),
                         ("speculative", KvAccountingSpec::PARAMS),
                         ("speculative", KvAdmissionSpec::PARAMS),
                         ("pipeline_chunked_prefill", KvAccountingSpec::PARAMS),
